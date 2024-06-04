@@ -139,6 +139,7 @@ pub struct SignatureRecord {
     pub req_id: usize,
     pub signature: Signature,
     pub mode: Mode,
+    pub consumers: Vec<String>,
     pub partner_name: String,
 }
 
@@ -220,9 +221,10 @@ async fn signature_checker(client: Arc<RpcClient>, bundle: Vec<SignatureRecord>)
                 let _span = span.enter();
                 if let Some(known_status) = signature_status {
                     info!(
-                        "new signature status # {{{},\"rtime\":{}}}",
+                        "new signature status # {{{},\"rtime\":{},\"clients\":{}}}",
                         format_status(known_status),
                         record.rtime,
+                        json_str!(&record.consumers),
                     );
                     match known_status.err {
                         Some(_) => metrics::CHAIN_TX_EXECUTION_SUCCESS
@@ -241,10 +243,20 @@ async fn signature_checker(client: Arc<RpcClient>, bundle: Vec<SignatureRecord>)
                     metrics::CHAIN_TX_FINALIZED
                         .with_label_values(&[&record.partner_name, &record.mode.to_string()])
                         .inc();
+                    for consumer in &record.consumers {
+                        metrics::CHAIN_TX_FINALIZED_BY_CONSUMER
+                            .with_label_values(&[&consumer])
+                            .inc();
+                    }
                 } else {
                     metrics::CHAIN_TX_TIMEOUT
                         .with_label_values(&[&record.partner_name, &record.mode.to_string()])
                         .inc();
+                    for consumer in &record.consumers {
+                        metrics::CHAIN_TX_TIMEOUT_BY_CONSUMER
+                            .with_label_values(&[&consumer])
+                            .inc();
+                    }
                 }
             }
         }

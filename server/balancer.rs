@@ -2,8 +2,8 @@ use crate::grpc_server::{self, build_tx_message_envelope};
 use crate::json_str;
 use crate::metrics;
 use crate::solana_service::{get_leader_info, leaders_stream, LeaderInfo};
-use crate::GOSSIP_ENTRYPOINT;
-use crate::{NODES_REFRESH_SECONDS, N_CONSUMERS, N_COPIES};
+use crate::{GOSSIP_ENTRYPOINT, NODES_REFRESH_SECONDS, N_CONSUMERS, N_COPIES};
+use crate::solana_service::SignatureRecord;
 use jsonrpc_http_server::*;
 use log::{error, info};
 use rand::rngs::StdRng;
@@ -26,6 +26,7 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio_stream::{wrappers::UnboundedReceiverStream, StreamExt};
 use tonic::Status;
 use tracing::Instrument;
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug)]
 pub struct TxMessage {
@@ -49,16 +50,27 @@ impl Drop for TxConsumer {
     }
 }
 
-#[derive(Default)]
 pub struct Balancer {
-    pub tx_consumers: HashMap<String, TxConsumer>,
-    pub stake_weights: HashMap<String, u64>,
-    pub total_connected_stake: u64,
-    pub leaders: HashMap<String, LeaderInfo>,
-    pub leader_tpus: Vec<LeaderInfo>,
+    tx_consumers: HashMap<String, TxConsumer>,
+    stake_weights: HashMap<String, u64>,
+    total_connected_stake: u64,
+    leaders: HashMap<String, LeaderInfo>,
+    leader_tpus: Vec<LeaderInfo>,
+    watcher_inbox: UnboundedSender<SignatureRecord>,
 }
 
 impl Balancer {
+    pub fn new(watcher_inbox: UnboundedSender<SignatureRecord>) -> Self {
+        Self {
+            watcher_inbox,
+            tx_consumers: Default::default(),
+            stake_weights: Default::default(),
+            total_connected_stake: Default::default(),
+            leaders: Default::default(),
+            leader_tpus: Default::default(),
+        }
+    }
+
     pub fn subscribe(
         &mut self,
         identity: String,
@@ -68,7 +80,7 @@ impl Balancer {
         mpsc::Receiver<std::result::Result<grpc_server::pb::ResponseMessageEnvelope, Status>>,
         oneshot::Receiver<()>,
     ) {
-        info!("Subscribing {} ({})", &identity, &token);
+        info!("Subscribing # {{\"identity\":\"{identity}\",\"token\":\"{token}\"}}");
         let (tx, rx) = mpsc::channel(100);
         let (tx_unsubscribe, rx_unsubcribe) = oneshot::channel();
         self.tx_consumers.insert(
@@ -185,6 +197,7 @@ impl Balancer {
     pub async fn publish(
         &self,
         span: tracing::Span,
+        mut session: SignatureRecord,
         signature: String,
         data: String,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -211,13 +224,22 @@ impl Balancer {
                 .await;
             let _span = span.enter();
             match result {
-                Ok(_) => info!("forwarded to {} # {info_json}", tx_consumer.identity),
+                Ok(_) => {
+                    info!("forwarded to {} # {info_json}", tx_consumer.identity);
+                    session.consumers.push(tx_consumer.identity.clone());
+                }
                 Err(err) => {
                     error!("Client disconnected {} {}", tx_consumer.identity, err);
                     tx_consumer.do_unsubscribe.store(true, Ordering::Relaxed);
                 }
             };
         }
+
+        if let Err(err) = self.watcher_inbox.send(session) {
+            let _span = span.enter();
+            error!("Failed to propagate signature to the watcher: {}", err);
+        }
+
         Ok(())
     }
 
