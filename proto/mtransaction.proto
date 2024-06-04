@@ -49,6 +49,6 @@ message Metrics {
 
 message Rtt {
   string ip = 1;
-  uint64 rtt = 2;
+  uint64 took = 2;
   uint64 n = 3;
 }
