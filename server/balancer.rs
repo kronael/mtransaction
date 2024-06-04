@@ -4,6 +4,7 @@ use crate::metrics;
 use crate::solana_service::{get_leader_info, leaders_stream, LeaderInfo};
 use crate::{GOSSIP_ENTRYPOINT, NODES_REFRESH_SECONDS, N_CONSUMERS, N_COPIES};
 use crate::solana_service::SignatureRecord;
+use crate::grpc_server::pb;
 use jsonrpc_http_server::*;
 use log::{error, info};
 use rand::rngs::StdRng;
@@ -50,12 +51,19 @@ impl Drop for TxConsumer {
     }
 }
 
+#[derive(Default)]
+struct RttValue {
+    rtt: u64,
+    n: u64,
+}
+
 pub struct Balancer {
     tx_consumers: HashMap<String, TxConsumer>,
     stake_weights: HashMap<String, u64>,
     total_connected_stake: u64,
     leaders: HashMap<String, LeaderInfo>,
     leader_tpus: Vec<LeaderInfo>,
+    rtt_values: HashMap<String, HashMap<String, RttValue>>,
     watcher_inbox: UnboundedSender<SignatureRecord>,
 }
 
@@ -68,6 +76,7 @@ impl Balancer {
             total_connected_stake: Default::default(),
             leaders: Default::default(),
             leader_tpus: Default::default(),
+            rtt_values: Default::default(),
         }
     }
 
@@ -263,6 +272,21 @@ impl Balancer {
     ) {
         self.leader_tpus = leader_tpus;
         self.leaders = leaders;
+    }
+
+    pub fn update_rtt(
+        &mut self,
+        identity: &str,
+        value: pb::Rtt,
+    ) {
+        let slot = self.rtt_values
+            .entry(identity.to_string())
+            .or_default()
+            .entry(value.ip)
+            .or_default();
+        let n = slot.n + value.n;
+        slot.rtt = (slot.n * slot.rtt + value.n * value.rtt) / n;
+        slot.n = n;
     }
 
     pub fn flush_unsubscribes(&mut self) {
