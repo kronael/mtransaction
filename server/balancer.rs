@@ -18,7 +18,7 @@ use solana_streamer::socket::SocketAddrSpace;
 use std::net::ToSocketAddrs;
 use std::str::FromStr;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::atomic::{AtomicBool, Ordering},
     sync::Arc,
 };
@@ -212,7 +212,17 @@ impl Balancer {
 
         for (tx_consumer, info) in tx_consumers {
             let info_json = json_str!(&info);
-            let tpus = info.iter().map(|x| x.tpu.clone()).collect();
+            let tpus: Vec<_> = info
+                .iter()
+                .map(|x| x.tpu.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            let tpu_ips: Vec<_> = tpus
+                .iter()
+                .filter_map(|x| x.split(':').next())
+                .map(|x| x.to_string())
+                .collect();
             let result = tx_consumer
                 .tx
                 .send(Ok(build_tx_message_envelope(
@@ -227,6 +237,9 @@ impl Balancer {
                 Ok(_) => {
                     info!("forwarded to {} # {info_json}", tx_consumer.identity);
                     session.consumers.push(tx_consumer.identity.clone());
+                    for tpu_ip in tpu_ips {
+                        session.tpu_ips.insert(tpu_ip);
+                    }
                 }
                 Err(err) => {
                     error!("Client disconnected {} {}", tx_consumer.identity, err);

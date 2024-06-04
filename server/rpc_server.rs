@@ -193,6 +193,7 @@ impl Rpc for RpcServer {
             partner_name: auth.to_string(),
             mode: meta.mode.clone(),
             consumers: vec![],
+            tpu_ips: Default::default(),
         };
         Box::pin(async move {
             match meta
