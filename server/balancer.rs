@@ -2,7 +2,7 @@ use crate::grpc_server::{self, build_tx_message_envelope};
 use crate::json_str;
 use crate::metrics;
 use crate::solana_service::{get_leader_info, leaders_stream, LeaderInfo};
-use crate::{GOSSIP_ENTRYPOINT, NODES_REFRESH_SECONDS, N_CONSUMERS, N_COPIES};
+use crate::{GOSSIP_ENTRYPOINT, NODES_REFRESH_SECONDS, N_COPIES};
 use crate::solana_service::SignatureRecord;
 use crate::grpc_server::pb;
 use jsonrpc_http_server::*;
@@ -52,9 +52,15 @@ impl Drop for TxConsumer {
 }
 
 #[derive(Default)]
-struct RttValue {
-    took: u64,
-    n: u64,
+struct Values {
+    rtt: Proportion,
+    success: Proportion,
+}
+
+#[derive(Default)]
+struct Proportion {
+    count: f64,
+    total: f64,
 }
 
 pub struct Balancer {
@@ -63,7 +69,7 @@ pub struct Balancer {
     total_connected_stake: u64,
     leaders: HashMap<String, LeaderInfo>,
     leader_tpus: Vec<LeaderInfo>,
-    rtt_values: HashMap<String, HashMap<String, RttValue>>,
+    values: HashMap<String, HashMap<String, Values>>,
     watcher_inbox: UnboundedSender<SignatureRecord>,
 }
 
@@ -90,7 +96,7 @@ impl Balancer {
             total_connected_stake: Default::default(),
             leaders: Default::default(),
             leader_tpus: Default::default(),
-            rtt_values: Default::default(),
+            values: Default::default(),
         }
     }
 
@@ -137,11 +143,15 @@ impl Balancer {
             Some(value) => { value }
             None => { return 0.01; }
         };
-        let rtt = self.rtt_values.get(identity)
-            .and_then(|x| x.get(tpu_ip))
-            .map(|x| x.took as f64 / x.n as f64)
-            .unwrap_or(40.0);
-        (40.0 - rtt).max(0.01)
+        let values = match self.values.get(identity).and_then(|x| x.get(tpu_ip)) {
+            Some(value) => { value }
+            None => { return 0.01; }
+        };
+                
+        let rtt = values.rtt.count / values.rtt.total;
+        let land_ratio = values.success.count / values.success.total;
+
+        (land_ratio * (40.0 - rtt)).max(0.01)
     }
 
     pub fn sample_consumer_for_tpu(&self, rng: &mut StdRng, identity: &str, tpu: &str) -> Option<&TxConsumer> {
@@ -169,7 +179,7 @@ impl Balancer {
         return None;
     }
 
-    pub fn sample_consumer_stake_weighted(&self, rng: &mut StdRng) -> Option<&TxConsumer> {
+    pub fn select_consumer(&self, stake_point: f64) -> Option<&TxConsumer> {
         let total_weight = if self.total_connected_stake == 0 {
             if !self.tx_consumers.is_empty() {
                 self.tx_consumers.len() as u64
@@ -179,64 +189,55 @@ impl Balancer {
         } else {
             self.total_connected_stake
         };
+        let point = (stake_point * total_weight as f64) as u64;
 
-        let random_stake_point = (rng.gen::<f64>() * total_weight as f64) as u64;
         let mut accumulated_sum = 0;
-
         for (_, tx_consumer) in self.tx_consumers.iter() {
             accumulated_sum += tx_consumer.stake + 1;
-            if random_stake_point < accumulated_sum {
+            if point < accumulated_sum {
                 return Some(tx_consumer);
             }
         }
-        return None;
+        None
     }
 
     pub fn pick_consumers(&self) -> Vec<(&TxConsumer, Vec<LeaderInfo>)> {
-        let mut rng = SeedableRng::from_entropy();
-
-        for tpu in &self.leader_tpus {
-            let candidate = self.sample_consumer_stake_weighted(rng);
-            let density = self.calculate_consumer_density(&candidate.identity, tpu);
-            let rand = safe_reject_sample(rng, density);
-        }
-
-        // If some of the consumers are leaders, pick them.
-        // Pick the rest randomly.
-        let mut consumers: Vec<_> = self
-            .tx_consumers
-            .iter()
-            .flat_map(|(identity, tx_consumer)| match self.leaders.get(identity) {
-                Some(tpu) => Some((tx_consumer, vec![tpu.clone()])),
-                _ => None,
-            })
-            .collect();
-
-        for _ in 0..N_CONSUMERS - consumers.len().min(N_CONSUMERS) {
-            // TODO ... make it so that the sample can not degenerate
-            match self.sample_consumer_stake_weighted(&mut rng) {
-                Some(pick) => {
-                    consumers.push((pick, vec![]));
+        let mut consumers: HashMap<String, Vec<LeaderInfo>> = HashMap::default();
+        let mut rng: StdRng = SeedableRng::from_entropy();
+        for _ in 0..N_COPIES {
+            for (identity, leader) in &self.leaders {
+                let leader = leader.clone();
+                if let Some(tx_consumer) = self.tx_consumers.get(identity) {
+                    // If some of the consumers are leaders, pick them along with their TPU.
+                    let entry = consumers.entry(tx_consumer.identity.clone()).or_default();
+                    entry.push(leader);
+                    continue;
                 }
-                None => {
-                    break;
-                }
-            }
-        }
 
-        let n = consumers.len();
-        if n > 0 && !self.leader_tpus.is_empty() {
-            let chunk_len = self.leader_tpus.len() / n;
-            for (i, tpus) in self.leader_tpus.chunks(chunk_len).enumerate() {
-                for tpu in tpus {
-                    for j in 0..N_COPIES {
-                        consumers[(i + j) % n].1.push(tpu.clone());
-                    }
-                }
+                // Pick the rest randomly.
+                let candidate = match self.select_consumer(rng.gen()) {
+                    Some(value) => { value }
+                    // TODO ... this means stake is empty ... should not have to be here
+                    None => { continue; }
+                };
+                let density = self.calculate_consumer_density(&candidate.identity, &leader.tpu);
+                let rand = safe_reject_sample(&mut rng, density);
+                let tx_consumer = match self.select_consumer(rand) {
+                    Some(value) => { value }
+                    None => { continue; }
+                };
+                let entry = consumers.entry(tx_consumer.identity.clone()).or_default();
+                entry.push(leader);
             }
         }
 
         consumers
+            .into_iter()
+            .filter_map(
+                |(identity, leaders)|
+                self.tx_consumers.get(&identity).and_then(|x| Some((x, leaders)))
+            )
+            .collect()
     }
 
     pub fn update_stake_weights(&mut self, stake_weights: HashMap<String, u64>) {
@@ -344,13 +345,13 @@ impl Balancer {
         identity: &str,
         value: pb::Rtt,
     ) {
-        let slot = self.rtt_values
+        let slot = self.values
             .entry(identity.to_string())
             .or_default()
             .entry(value.ip.clone())
             .or_default();
-        slot.took += value.took;
-        slot.n += value.n;
+        slot.rtt.total += value.took as f64;
+        slot.rtt.count += value.n as f64;
         metrics::CLIENT_TPU_IP_PING_RTT
             .with_label_values(&[
                 &identity,
