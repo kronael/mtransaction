@@ -11,6 +11,10 @@ path = "server/main.rs"
 name = "mtx-client"
 path = "client/main.rs"
 
+[[bin]]
+name = "mtx-mock-validator"
+path = "mock-validator/main.rs"
+
 [dependencies]
 lazy_static = "1.4.0"
 openssl = { version = "0.10" }
@@ -49,10 +53,13 @@ signal-hook = "0.3.17"
 solana-gossip = "1.17.34"
 solana-streamer = "1.17.34"
 reqwest = ">=0.12"
-eyre = ">=0.6.12"
+anyhow = ">=1.0"
 tracing = ">=0.1.40"
 tracing-log = ">=0.2.0"
 tracing-subscriber = ">=0.3.18"
+quinn = ">=0.10"
+rustls = ">=0.21"
+rustls-pemfile = ">=2.1.2"
 
 [build-dependencies]
 tonic-build = { version = "0.8.0", features = ["prost"] }

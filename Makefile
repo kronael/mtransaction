@@ -24,6 +24,9 @@ $(JWT_KEY):
 cert-client:
 	./scripts/cert-client.bash $(cmd) $(validator)
 
+build-mock-validator:
+	cargo build --bin mtx-mock-validator
+
 build-server:
 	cargo build --bin mtx-server
 
@@ -42,6 +45,9 @@ build-all-release: build-server-release build-client-release
 
 clean:
 	rm -rf target certs/*.cert certs/*.key certs/*.srl certs/*.req demo/node_modules client/node_modules
+
+run-mock-validator: build-mock-validator
+	cargo run --bin mtx-mock-validator
 
 run-server: build-server
 	cargo run --bin mtx-server -- \

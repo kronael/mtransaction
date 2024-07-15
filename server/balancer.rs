@@ -1,10 +1,10 @@
+use crate::grpc_server::pb;
 use crate::grpc_server::{self, build_tx_message_envelope};
 use crate::json_str;
 use crate::metrics;
+use crate::solana_service::SignatureRecord;
 use crate::solana_service::{get_leader_info, leaders_stream, LeaderInfo};
 use crate::{GOSSIP_ENTRYPOINT, NODES_REFRESH_SECONDS, N_CONSUMERS, N_COPIES};
-use crate::solana_service::SignatureRecord;
-use crate::grpc_server::pb;
 use jsonrpc_http_server::*;
 use log::{error, info};
 use rand::rngs::StdRng;
@@ -23,11 +23,11 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     sync::Arc,
 };
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio_stream::{wrappers::UnboundedReceiverStream, StreamExt};
 use tonic::Status;
 use tracing::Instrument;
-use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug)]
 pub struct TxMessage {
@@ -274,12 +274,9 @@ impl Balancer {
         self.leaders = leaders;
     }
 
-    pub fn update_rtt(
-        &mut self,
-        identity: &str,
-        value: pb::Rtt,
-    ) {
-        let slot = self.rtt_values
+    pub fn update_rtt(&mut self, identity: &str, value: pb::Rtt) {
+        let slot = self
+            .rtt_values
             .entry(identity.to_string())
             .or_default()
             .entry(value.ip)
